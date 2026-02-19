@@ -2,19 +2,23 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 
 const app = express();
-
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL 
+    ? process.env.FRONTEND_URL.split(",") 
+    : ["*"],
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  credentials: true
+}));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ================= DATABASE =================
-mongoose.connect("mongodb://127.0.0.1:27017/busdb")
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.log("❌ MongoDB error:", err));
-
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log(" MongoDB connected"))
+  .catch(err => console.log(" MongoDB error:", err));
 // ================= USER MODEL =================
 const UserSchema = new mongoose.Schema({
   email:             { type: String, required: true, unique: true },
