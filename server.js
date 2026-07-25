@@ -1,24 +1,48 @@
 // server.js
+require('dotenv').config();
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 
 const app = express();
+
+// ✅ FIX 1: Better MongoDB connection options
+mongoose.connect(process.env.MONGO_URI, {
+  serverSelectionTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  maxPoolSize: 10,
+  retryWrites: true,
+})
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.log("❌ MongoDB error:", err));
+
+// ✅ FIX 2: Connection event handlers
+mongoose.connection.on("disconnected", () => {
+  console.log("⚠️ MongoDB disconnected. Reconnecting...");
+  setTimeout(() => {
+    mongoose.connect(process.env.MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    }).catch(err => console.log("Reconnect error:", err));
+  }, 5000);
+});
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL 
-    ? process.env.FRONTEND_URL.split(",") 
-    : ["*"],
+  origin: ["https://r-momentum.vercel.app"],
   methods: ["GET","POST","PUT","DELETE","OPTIONS"],
   credentials: true
 }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ================= DATABASE =================
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log(" MongoDB connected"))
-  .catch(err => console.log(" MongoDB error:", err));
+// ✅ FIX 3: Health check route (Render sleep se bachane ke liye)
+app.get("/", (req, res) => res.json({ status: "ok", message: "Bus Buddy Server Running ✅" }));
+app.get("/health", (req, res) => res.json({ status: "ok", db: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
+
 // ================= USER MODEL =================
 const UserSchema = new mongoose.Schema({
   email:             { type: String, required: true, unique: true },
@@ -37,7 +61,7 @@ const StudentSchema = new mongoose.Schema({
   dob:        { type: String, default: "" },
   course:     { type: String, default: "" },
   college:    { type: String, default: "GEHU – Haldwani" },
-  password:   { type: String, default: "" }, // plain text — admin display only
+  password:   { type: String, default: "" },
   photo:      { type: String, default: "" },
   txnId:      { type: String, default: "" },
   bookedBus:  { type: String, default: "" },
@@ -46,26 +70,24 @@ const StudentSchema = new mongoose.Schema({
 const Student = mongoose.model("Student", StudentSchema);
 
 // ================= BUS BOOKING MODEL =================
-// ✅ NEW — Server restart ke baad bhi data safe rahega MongoDB mein
 const BookingSchema = new mongoose.Schema({
-  bus:              { type: String, required: true },   // "A", "B", etc.
+  bus:              { type: String, required: true },
   name:             { type: String, default: "" },
   course:           { type: String, default: "" },
   studentId:        { type: String, default: "" },
   seatNo:           { type: Number, default: null },
-  paymentScreenshot:{ type: String, default: "" },      // base64 image
+  paymentScreenshot:{ type: String, default: "" },
   bookedAt:         { type: Date, default: Date.now }
 });
 const Booking = mongoose.model("Booking", BookingSchema);
 
 // ================= COMPLAINT MODEL =================
-// ✅ NEW — Server restart ke baad bhi complaints safe rahegi
 const ComplaintSchema = new mongoose.Schema({
   bus:        { type: String, default: "" },
   name:       { type: String, default: "Anonymous" },
   text:       { type: String, default: "" },
   date:       { type: String, default: "" },
-  status:     { type: String, default: "pending" },    // "pending" | "resolved"
+  status:     { type: String, default: "pending" },
   resolved:   { type: Boolean, default: false },
   actionTaken:{ type: String, default: "" },
   resolvedAt: { type: String, default: "" },
@@ -74,7 +96,6 @@ const ComplaintSchema = new mongoose.Schema({
 const Complaint = mongoose.model("Complaint", ComplaintSchema);
 
 // ================= NOTICE MODEL =================
-// ✅ NEW — Notices bhi MongoDB mein save hongi
 const NoticeSchema = new mongoose.Schema({
   bus:  { type: String, default: "" },
   text: { type: String, default: "" },
@@ -83,18 +104,23 @@ const NoticeSchema = new mongoose.Schema({
 });
 const Notice = mongoose.model("Notice", NoticeSchema);
 
-// =================================================
-// ================= AUTH ROUTES ===================
-// =================================================
+// ✅ FIX 4: DB check middleware — agar DB connected nahi to error do
+function checkDB(req, res, next) {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ success: false, message: "Database not connected. Please try again in a moment." });
+  }
+  next();
+}
 
-// ── LOGIN ──────────────────────────────────────────
-app.post("/auth/login", async (req, res) => {
+// =================================================
+// AUTH ROUTES
+// =================================================
+app.post("/auth/login", checkDB, async (req, res) => {
   try {
     const { email, password, role } = req.body;
     if (!email || !password || !role)
       return res.json({ success: false, message: "All fields required" });
 
-    // Hardcoded admin
     if (email === "admin@example.com" && password === "admin@123" && role === "Admin")
       return res.json({ success: true, role: "Admin" });
 
@@ -111,16 +137,14 @@ app.post("/auth/login", async (req, res) => {
 
   } catch (err) {
     console.log("LOGIN ERROR:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(500).json({ success: false, message: "Server error: " + err.message });
   }
 });
 
 // =================================================
-// ================= ADMIN ROUTES ==================
+// ADMIN ROUTES
 // =================================================
-
-// ── GET ALL STUDENTS ───────────────────────────────
-app.get("/admin/students", async (req, res) => {
+app.get("/admin/students", checkDB, async (req, res) => {
   try {
     const students = await Student.find({});
     res.json({ success: true, students });
@@ -129,8 +153,7 @@ app.get("/admin/students", async (req, res) => {
   }
 });
 
-// ── ADD STUDENT ────────────────────────────────────
-app.post("/admin/students/add", async (req, res) => {
+app.post("/admin/students/add", checkDB, async (req, res) => {
   try {
     const { name, rollNo, email, phone, dob, course, college, password } = req.body;
     if (!name || !email || !password)
@@ -158,8 +181,7 @@ app.post("/admin/students/add", async (req, res) => {
   }
 });
 
-// ── UPDATE STUDENT ─────────────────────────────────
-app.put("/admin/students/:email", async (req, res) => {
+app.put("/admin/students/:email", checkDB, async (req, res) => {
   try {
     const email   = decodeURIComponent(req.params.email);
     const updates = req.body;
@@ -177,8 +199,7 @@ app.put("/admin/students/:email", async (req, res) => {
   }
 });
 
-// ── DELETE STUDENT ─────────────────────────────────
-app.delete("/admin/students/:email", async (req, res) => {
+app.delete("/admin/students/:email", checkDB, async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     await Student.findOneAndDelete({ email });
@@ -189,8 +210,7 @@ app.delete("/admin/students/:email", async (req, res) => {
   }
 });
 
-// ── FIX ALL PASSWORDS (one-time utility) ──────────
-app.get("/admin/fix-passwords", async (req, res) => {
+app.get("/admin/fix-passwords", checkDB, async (req, res) => {
   try {
     const students = await Student.find({});
     let fixed = 0;
@@ -212,12 +232,9 @@ app.get("/admin/fix-passwords", async (req, res) => {
 });
 
 // =================================================
-// ================= BUS BOOKING ROUTES ============
-// ✅ NEW — MongoDB mein permanent save
+// BUS BOOKING ROUTES
 // =================================================
-
-// ── GET bookings for a specific bus ───────────────
-app.get("/bus/bookings/:bus", async (req, res) => {
+app.get("/bus/bookings/:bus", checkDB, async (req, res) => {
   try {
     const bus = req.params.bus.toUpperCase();
     const bookings = await Booking.find({ bus }).sort({ seatNo: 1 });
@@ -227,14 +244,11 @@ app.get("/bus/bookings/:bus", async (req, res) => {
   }
 });
 
-// ── ADD / UPDATE a booking ─────────────────────────
-// Called by student app when they book a seat
-app.post("/bus/bookings/:bus", async (req, res) => {
+app.post("/bus/bookings/:bus", checkDB, async (req, res) => {
   try {
     const bus = req.params.bus.toUpperCase();
     const { name, course, studentId, seatNo, paymentScreenshot } = req.body;
 
-    // Ek student ek hi seat book kar sake — upsert by studentId + bus
     await Booking.findOneAndUpdate(
       { bus, studentId: String(studentId) },
       { $set: { bus, name, course, studentId: String(studentId),
@@ -249,8 +263,7 @@ app.post("/bus/bookings/:bus", async (req, res) => {
   }
 });
 
-// ── DELETE a specific booking (admin use) ─────────
-app.post("/bus/bookings/:bus/delete", async (req, res) => {
+app.post("/bus/bookings/:bus/delete", checkDB, async (req, res) => {
   try {
     const bus = req.params.bus.toUpperCase();
     const { studentId, seatNo } = req.body;
@@ -261,13 +274,8 @@ app.post("/bus/bookings/:bus/delete", async (req, res) => {
       seatNo: Number(seatNo)
     });
 
-    // Student ke bookedBus + bookedSeat bhi clear karo
     await Student.findOneAndUpdate(
-      { $or: [
-          { rollNo: String(studentId) },
-          { email: String(studentId) }
-        ]
-      },
+      { $or: [{ rollNo: String(studentId) }, { email: String(studentId) }] },
       { $set: { bookedBus: "", bookedSeat: null } }
     );
 
@@ -277,8 +285,7 @@ app.post("/bus/bookings/:bus/delete", async (req, res) => {
   }
 });
 
-// ── GET all bookings across all buses (admin overview) ──
-app.get("/bus/bookings", async (req, res) => {
+app.get("/bus/bookings", checkDB, async (req, res) => {
   try {
     const bookings = await Booking.find({}).sort({ bus: 1, seatNo: 1 });
     res.json({ success: true, bookings });
@@ -288,12 +295,9 @@ app.get("/bus/bookings", async (req, res) => {
 });
 
 // =================================================
-// ================= COMPLAINT ROUTES ==============
-// ✅ NEW — MongoDB mein permanent save
+// COMPLAINT ROUTES
 // =================================================
-
-// ── GET all complaints ─────────────────────────────
-app.get("/complaints", async (req, res) => {
+app.get("/complaints", checkDB, async (req, res) => {
   try {
     const complaints = await Complaint.find({}).sort({ createdAt: -1 });
     res.json({ success: true, complaints });
@@ -302,8 +306,7 @@ app.get("/complaints", async (req, res) => {
   }
 });
 
-// ── POST a new complaint (student app se) ──────────
-app.post("/complaints", async (req, res) => {
+app.post("/complaints", checkDB, async (req, res) => {
   try {
     const { bus, name, text, date } = req.body;
     if (!text) return res.json({ success: false, message: "Complaint text required" });
@@ -323,15 +326,12 @@ app.post("/complaints", async (req, res) => {
   }
 });
 
-// ── SAVE / SYNC all complaints (admin bulk update) ─
-// Admin resolve ya delete kare to ye route call hoga
-app.post("/complaints/save", async (req, res) => {
+app.post("/complaints/save", checkDB, async (req, res) => {
   try {
     const { complaints } = req.body;
     if (!Array.isArray(complaints))
       return res.json({ success: false, message: "Invalid data" });
 
-    // Har complaint ko individually update karo (_id se match)
     for (const c of complaints) {
       if (c._id) {
         await Complaint.findByIdAndUpdate(c._id, {
@@ -345,7 +345,6 @@ app.post("/complaints/save", async (req, res) => {
       }
     }
 
-    // IDs jo nahi hain unhe delete karo (admin ne delete kiya)
     const existingIds = complaints.filter(c => c._id).map(c => c._id);
     if (existingIds.length > 0) {
       await Complaint.deleteMany({ _id: { $nin: existingIds } });
@@ -358,16 +357,14 @@ app.post("/complaints/save", async (req, res) => {
   }
 });
 
-// ── RESOLVE a single complaint by ID ──────────────
-app.put("/complaints/:id/resolve", async (req, res) => {
+app.put("/complaints/:id/resolve", checkDB, async (req, res) => {
   try {
     const { actionTaken } = req.body;
     await Complaint.findByIdAndUpdate(req.params.id, {
       $set: {
-        resolved:    true,
-        status:      "resolved",
+        resolved: true, status: "resolved",
         actionTaken: actionTaken || "",
-        resolvedAt:  new Date().toLocaleString()
+        resolvedAt: new Date().toLocaleString()
       }
     });
     res.json({ success: true, message: "Complaint resolved" });
@@ -376,8 +373,7 @@ app.put("/complaints/:id/resolve", async (req, res) => {
   }
 });
 
-// ── DELETE a single complaint by ID ───────────────
-app.delete("/complaints/:id", async (req, res) => {
+app.delete("/complaints/:id", checkDB, async (req, res) => {
   try {
     await Complaint.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Complaint deleted" });
@@ -387,12 +383,9 @@ app.delete("/complaints/:id", async (req, res) => {
 });
 
 // =================================================
-// ================= NOTICE ROUTES =================
-// ✅ NEW — Notices bhi MongoDB mein
+// NOTICE ROUTES
 // =================================================
-
-// ── GET all notices ────────────────────────────────
-app.get("/notices", async (req, res) => {
+app.get("/notices", checkDB, async (req, res) => {
   try {
     const notices = await Notice.find({}).sort({ createdAt: -1 }).limit(50);
     res.json({ success: true, notices });
@@ -401,8 +394,7 @@ app.get("/notices", async (req, res) => {
   }
 });
 
-// ── GET notices for a specific bus ────────────────
-app.get("/notices/:bus", async (req, res) => {
+app.get("/notices/:bus", checkDB, async (req, res) => {
   try {
     const bus = req.params.bus.toUpperCase();
     const notices = await Notice.find({
@@ -414,21 +406,16 @@ app.get("/notices/:bus", async (req, res) => {
   }
 });
 
-// ── SAVE notices (admin panel se) ─────────────────
-app.post("/notices/save", async (req, res) => {
+app.post("/notices/save", checkDB, async (req, res) => {
   try {
     const { notices } = req.body;
     if (!Array.isArray(notices))
       return res.json({ success: false, message: "Invalid data" });
 
-    // Sirf naye notices add karo (jo MongoDB mein nahi hain)
     for (const n of notices) {
       if (!n._id) {
-        // New notice — save karo
         await Notice.create({
-          bus:  n.bus  || "",
-          text: n.text || "",
-          date: n.date || new Date().toLocaleString()
+          bus: n.bus || "", text: n.text || "", date: n.date || new Date().toLocaleString()
         });
       }
     }
@@ -439,11 +426,9 @@ app.post("/notices/save", async (req, res) => {
 });
 
 // =================================================
-// ================= STUDENT ROUTES ================
+// STUDENT ROUTES
 // =================================================
-
-// ── GET profile ────────────────────────────────────
-app.get("/student/profile/:email", async (req, res) => {
+app.get("/student/profile/:email", checkDB, async (req, res) => {
   try {
     const email   = decodeURIComponent(req.params.email);
     const student = await Student.findOne({ email });
@@ -454,8 +439,7 @@ app.get("/student/profile/:email", async (req, res) => {
   }
 });
 
-// ── UPDATE photo ───────────────────────────────────
-app.put("/student/photo/:email", async (req, res) => {
+app.put("/student/photo/:email", checkDB, async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     await Student.findOneAndUpdate({ email }, { $set: { photo: req.body.photo } });
@@ -465,8 +449,7 @@ app.put("/student/photo/:email", async (req, res) => {
   }
 });
 
-// ── SET txn ID ─────────────────────────────────────
-app.put("/student/txn/:email", async (req, res) => {
+app.put("/student/txn/:email", checkDB, async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     await Student.findOneAndUpdate({ email }, { $set: { txnId: req.body.txnId } });
@@ -476,31 +459,23 @@ app.put("/student/txn/:email", async (req, res) => {
   }
 });
 
-// ── SAVE seat booking ──────────────────────────────
-app.put("/student/seat/:email", async (req, res) => {
+app.put("/student/seat/:email", checkDB, async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     const { bookedBus, bookedSeat, name, course, rollNo, paymentScreenshot } = req.body;
 
-    // Student profile update karo
-    await Student.findOneAndUpdate(
-      { email },
-      { $set: { bookedBus, bookedSeat } }
-    );
+    await Student.findOneAndUpdate({ email }, { $set: { bookedBus, bookedSeat } });
 
-    // ✅ Booking collection mein bhi save karo (admin dashboard ke liye)
     const student = await Student.findOne({ email });
     if (student) {
       await Booking.findOneAndUpdate(
         { bus: bookedBus, studentId: student.rollNo || email },
         { $set: {
-            bus:              bookedBus,
-            name:             student.name || name || "",
-            course:           student.course || course || "",
-            studentId:        student.rollNo || email,
-            seatNo:           bookedSeat,
-            paymentScreenshot: paymentScreenshot || "",
-            bookedAt:         new Date()
+            bus: bookedBus, name: student.name || name || "",
+            course: student.course || course || "",
+            studentId: student.rollNo || email,
+            seatNo: bookedSeat, paymentScreenshot: paymentScreenshot || "",
+            bookedAt: new Date()
           }
         },
         { upsert: true, new: true }
@@ -515,6 +490,7 @@ app.put("/student/seat/:email", async (req, res) => {
 });
 
 // =================================================
-// ================= START SERVER ==================
+// START SERVER
 // =================================================
-app.listen(5000, () => console.log("✅ Server running on http://localhost:5000"));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
