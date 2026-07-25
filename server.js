@@ -9,29 +9,32 @@ const bcrypt = require("bcryptjs");
 
 const app = express();
 
-// ✅ FIX 1: Better MongoDB connection options
-mongoose.connect(process.env.MONGO_URI, {
-  serverSelectionTimeoutMS: 10000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 10000,
-  maxPoolSize: 10,
-  retryWrites: true,
-})
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.log("❌ MongoDB error:", err));
+let cachedConnection = null;
 
-// ✅ FIX 2: Connection event handlers
-mongoose.connection.on("disconnected", () => {
-  console.log("⚠️ MongoDB disconnected. Reconnecting...");
-  setTimeout(() => {
-    mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-    }).catch(err => console.log("Reconnect error:", err));
-  }, 5000);
-});
+async function connectToDatabase() {
+  if (cachedConnection && mongoose.connection.readyState === 1) {
+    return cachedConnection;
+  }
+  cachedConnection = await mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
+    maxPoolSize: 10,
+    retryWrites: true,
+  });
+  console.log("MongoDB connected");
+  return cachedConnection;
+}
 
-app.use(cors({
+app.use(async (req, res, next) => {
+  try {
+    await connectToDatabase();
+    next();
+  } catch (err) {
+    console.log("MongoDB connection error:", err);
+    res.status(503).json({ success: false, message: "Database connection failed" });
+  }
+});app.use(cors({
   origin: true,
   methods: ["GET","POST","PUT","DELETE","OPTIONS"],
   credentials: true
