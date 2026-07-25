@@ -1,7 +1,9 @@
 // server.js
 require('dotenv').config();
 const dns = require('dns');
-dns.setServers(['8.8.8.8', '8.8.4.4']);
+if (process.env.NODE_ENV !== "production") {
+  dns.setServers(['8.8.8.8', '8.8.4.4']);
+}
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
