@@ -32,7 +32,7 @@ mongoose.connection.on("disconnected", () => {
 });
 
 app.use(cors({
-  origin: ["https://r-momentum.vercel.app"],
+  origin: true,
   methods: ["GET","POST","PUT","DELETE","OPTIONS"],
   credentials: true
 }));
