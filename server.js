@@ -48,10 +48,19 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // RAZORPAY
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+let razorpay = null;
+try {
+  if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+    razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  } else {
+    console.warn("⚠️ Razorpay keys missing — payment routes will be disabled until configured.");
+  }
+} catch (err) {
+  console.error("Razorpay init failed:", err);
+}
 
 app.get("/", (req, res) => res.json({ status: "ok", message: "Bus Buddy Server Running ✅" }));
 app.get("/health", (req, res) => res.json({ status: "ok", db: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
@@ -485,6 +494,9 @@ app.put("/student/seat/:email", checkDB, async (req, res) => {
 
 // PAYMENT ROUTES (Razorpay)
 app.post("/payment/create-order", checkDB, async (req, res) => {
+  if (!razorpay) {
+    return res.status(503).json({ success: false, message: "Payment service not configured yet." });
+  }
   try {
     const { email } = req.body;
     if (!email) return res.json({ success: false, message: "Email required" });
@@ -505,6 +517,9 @@ app.post("/payment/create-order", checkDB, async (req, res) => {
 
 // ── VERIFY PAYMENT ──
 app.post("/payment/verify", checkDB, async (req, res) => {
+  if (!razorpay) {
+    return res.status(503).json({ success: false, message: "Payment service not configured yet." });
+  }
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, email } = req.body;
 
