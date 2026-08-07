@@ -8,6 +8,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
+const Razorpay = require("razorpay");
+const crypto = require("crypto");
 
 const app = express();
 
@@ -36,7 +38,8 @@ app.use(async (req, res, next) => {
     console.log("MongoDB connection error:", err);
     res.status(503).json({ success: false, message: "Database connection failed" });
   }
-});app.use(cors({
+});
+app.use(cors({
   origin: true,
   methods: ["GET","POST","PUT","DELETE","OPTIONS"],
   credentials: true
@@ -44,11 +47,16 @@ app.use(async (req, res, next) => {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ✅ FIX 3: Health check route (Render sleep se bachane ke liye)
+// RAZORPAY
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
 app.get("/", (req, res) => res.json({ status: "ok", message: "Bus Buddy Server Running ✅" }));
 app.get("/health", (req, res) => res.json({ status: "ok", db: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
 
-// ================= USER MODEL =================
+// USER MODEL
 const UserSchema = new mongoose.Schema({
   email:             { type: String, required: true, unique: true },
   password:          { type: String, required: true },
@@ -57,7 +65,7 @@ const UserSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", UserSchema);
 
-// ================= STUDENT PROFILE MODEL =================
+// STUDENT PROFILE MODEL
 const StudentSchema = new mongoose.Schema({
   email:      { type: String, required: true, unique: true },
   name:       { type: String, default: "" },
@@ -69,12 +77,13 @@ const StudentSchema = new mongoose.Schema({
   password:   { type: String, default: "" },
   photo:      { type: String, default: "" },
   txnId:      { type: String, default: "" },
+  paymentDone:{ type: Boolean, default: false },
   bookedBus:  { type: String, default: "" },
   bookedSeat: { type: Number, default: null }
 });
 const Student = mongoose.model("Student", StudentSchema);
 
-// ================= BUS BOOKING MODEL =================
+// BUS BOOKING MODEL
 const BookingSchema = new mongoose.Schema({
   bus:              { type: String, required: true },
   name:             { type: String, default: "" },
@@ -86,7 +95,7 @@ const BookingSchema = new mongoose.Schema({
 });
 const Booking = mongoose.model("Booking", BookingSchema);
 
-// ================= COMPLAINT MODEL =================
+// COMPLAINT MODEL 
 const ComplaintSchema = new mongoose.Schema({
   bus:        { type: String, default: "" },
   name:       { type: String, default: "Anonymous" },
@@ -100,7 +109,7 @@ const ComplaintSchema = new mongoose.Schema({
 });
 const Complaint = mongoose.model("Complaint", ComplaintSchema);
 
-// ================= NOTICE MODEL =================
+// NOTICE MODEL
 const NoticeSchema = new mongoose.Schema({
   bus:  { type: String, default: "" },
   text: { type: String, default: "" },
@@ -109,7 +118,6 @@ const NoticeSchema = new mongoose.Schema({
 });
 const Notice = mongoose.model("Notice", NoticeSchema);
 
-// ✅ FIX 4: DB check middleware — agar DB connected nahi to error do
 function checkDB(req, res, next) {
   if (mongoose.connection.readyState !== 1) {
     return res.status(503).json({ success: false, message: "Database not connected. Please try again in a moment." });
@@ -117,9 +125,7 @@ function checkDB(req, res, next) {
   next();
 }
 
-// =================================================
 // AUTH ROUTES
-// =================================================
 app.post("/auth/login", checkDB, async (req, res) => {
   try {
     const { email, password, role } = req.body;
@@ -236,9 +242,7 @@ app.get("/admin/fix-passwords", checkDB, async (req, res) => {
   }
 });
 
-// =================================================
 // BUS BOOKING ROUTES
-// =================================================
 app.get("/bus/bookings/:bus", checkDB, async (req, res) => {
   try {
     const bus = req.params.bus.toUpperCase();
@@ -299,9 +303,7 @@ app.get("/bus/bookings", checkDB, async (req, res) => {
   }
 });
 
-// =================================================
 // COMPLAINT ROUTES
-// =================================================
 app.get("/complaints", checkDB, async (req, res) => {
   try {
     const complaints = await Complaint.find({}).sort({ createdAt: -1 });
@@ -387,9 +389,7 @@ app.delete("/complaints/:id", checkDB, async (req, res) => {
   }
 });
 
-// =================================================
 // NOTICE ROUTES
-// =================================================
 app.get("/notices", checkDB, async (req, res) => {
   try {
     const notices = await Notice.find({}).sort({ createdAt: -1 }).limit(50);
@@ -430,9 +430,7 @@ app.post("/notices/save", checkDB, async (req, res) => {
   }
 });
 
-// =================================================
 // STUDENT ROUTES
-// =================================================
 app.get("/student/profile/:email", checkDB, async (req, res) => {
   try {
     const email   = decodeURIComponent(req.params.email);
@@ -454,15 +452,6 @@ app.put("/student/photo/:email", checkDB, async (req, res) => {
   }
 });
 
-app.put("/student/txn/:email", checkDB, async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email);
-    await Student.findOneAndUpdate({ email }, { $set: { txnId: req.body.txnId } });
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-});
 
 app.put("/student/seat/:email", checkDB, async (req, res) => {
   try {
@@ -494,9 +483,54 @@ app.put("/student/seat/:email", checkDB, async (req, res) => {
   }
 });
 
-// =================================================
+// PAYMENT ROUTES (Razorpay)
+app.post("/payment/create-order", checkDB, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.json({ success: false, message: "Email required" });
+
+    const options = {
+      amount: 1500 * 100, // ₹1500 in paise
+      currency: "INR",
+      receipt: "receipt_" + Date.now(),
+    };
+
+    const order = await razorpay.orders.create(options);
+    res.json({ success: true, order, key: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error("ORDER CREATE ERROR:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ── VERIFY PAYMENT ──
+app.post("/payment/verify", checkDB, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, email } = req.body;
+
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.json({ success: false, message: "Payment verification failed" });
+    }
+
+    await Student.findOneAndUpdate(
+      { email },
+      { $set: { paymentDone: true, txnId: razorpay_payment_id } }
+    );
+
+    res.json({ success: true, message: "Payment verified successfully" });
+  } catch (err) {
+    console.error("PAYMENT VERIFY ERROR:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // START SERVER
-// =================================================
 const PORT = process.env.PORT || 5000;
 if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
